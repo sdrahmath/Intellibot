@@ -265,7 +265,6 @@ function App() {
       getMessages();
     }
   };
-
   const handleDeleteChat = (uniqueTitle) => {
     setCurrentTitle(uniqueTitle);
     setIsDeletePromptOpen(true);
