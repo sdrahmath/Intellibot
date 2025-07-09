@@ -23,7 +23,7 @@ function App() {
   const [theme, setTheme] = useState("default");
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const [isActive, setIsActive] = useState(false);
-
+  const silenceTimeoutRef = useRef(null);
   const toggleMenu = () => {
     setIsActive(!isActive);
   };
@@ -37,7 +37,7 @@ function App() {
   };
 
   const createNewChat = async () => {
-    setIsDefaultPage(true); // Hide the default page
+    setIsDefaultPage(false); // Hide the default page
 
     const chatNumber = previousChats.length;
     const uniqueTitle = `Chat ${chatNumber}`;
@@ -81,20 +81,19 @@ function App() {
       );
       setIsPromptOpen(false);
       setCurrentTitle(modalValue);
+      setIsDefaultPage(false);
     }
   };
 
   const getMessages = async () => {
-    if (!value) return; // Return if the input is empty
-    setPreviousChats((prevChats) => [
-      ...prevChats,
-      {
-        title: currentTitle,
-        role: "user",
-        content: value,
-      },
-    ]);
+    if (!value) return;
     setIsLoading(true);
+
+    // Clear the silence timeout when sending the message
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
 
     const options = {
       method: "POST",
@@ -113,33 +112,34 @@ function App() {
       );
       const data = await response.json();
 
+      // Update message state so that useEffect handles chat update
       if (data.image) {
-        // Check if the response contains an image
-        setPreviousChats((prevChats) => [
-          ...prevChats,
-          {
-            title: currentTitle,
-            role: "assistant",
-            content: "", // Empty content for the image message
-            image: data.image, // Add the `image` property to the chat message
-          },
-        ]);
+        setMessage({
+          title: currentTitle,
+          role: "assistant",
+          content: "",
+          image: data.image,
+        });
       } else {
-        setPreviousChats((prevChats) => [
-          ...prevChats,
-          {
-            title: currentTitle,
-            role: "assistant",
-            content: data.completion,
-          },
-        ]);
+        setMessage({
+          title: currentTitle,
+          role: "assistant",
+          content: data.completion,
+        });
       }
+
+      // Update message state with user message as well
+      setPreviousChats((prevChats) => [
+        ...prevChats,
+        {
+          title: currentTitle,
+          role: "user",
+          content: value,
+        },
+      ]);
+
       setValue("");
-      if (isSpeaking) {
-        stopSpeaking();
-      }
-      console.log("Assistant Response:", data.completion);
-      console.log("Generated Image URL:", data.image);
+      if (isSpeaking) stopSpeaking();
     } catch (error) {
       console.error(error);
     } finally {
@@ -174,21 +174,15 @@ function App() {
       )
     );
   };
-
   useEffect(() => {
     if (message) {
       setPreviousChats((prevChats) => [
         ...prevChats,
         {
           title: currentTitle,
-          role: "user",
-          content: value,
-        },
-        {
-          title: currentTitle,
           role: message.role,
-          content: message.content,
-          image: message.image, // Add the `image` property to the chat message
+          content: message.content, // This is already the string content
+          image: message.image,
         },
       ]);
     }
@@ -212,7 +206,7 @@ function App() {
         handlePromptSubmit(); // Programmatically click the "Rename" button
       } else {
         getMessages();
-        setIsDefaultPage(true);
+        setIsDefaultPage(false);
       }
     }
   };
@@ -229,6 +223,13 @@ function App() {
 
       recognition.current.onstart = () => {
         setIsListening(true);
+        // Start silence timer when recognition starts
+        silenceTimeoutRef.current = setTimeout(() => {
+          if (recognition.current && isListening) {
+            console.log("4 seconds of silence detected. Sending message.");
+            stopListening(); // This will trigger getMessages
+          }
+        }, 2000); // 4 seconds
       };
 
       recognition.current.onresult = (event) => {
@@ -237,15 +238,39 @@ function App() {
           .map((result) => result.transcript)
           .join("");
 
-        setValue(transcript);
+        setValue(transcript); // Always update the value with the latest transcript
+
+        // Only reset the silence timer if the transcript has actual content
+        // This means the timer will continue if 'onresult' fires with an empty transcript
+        if (transcript.trim().length > 0) { // Check if transcript is not just whitespace
+          if (silenceTimeoutRef.current) {
+            clearTimeout(silenceTimeoutRef.current);
+          }
+          silenceTimeoutRef.current = setTimeout(() => {
+            if (recognition.current && isListening) {
+              console.log("4 seconds of silence detected. Sending message.");
+              stopListening(); // This will trigger getMessages
+            }
+          }, 2000); // 4 seconds
+        }
       };
 
       recognition.current.onend = () => {
         setIsListening(false);
+        // Clear any lingering timeout when recognition truly ends
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
       };
 
       recognition.current.onerror = (event) => {
         console.error("Speech recognition error:", event.error);
+        setIsListening(false); // Stop listening on error
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
       };
     }
   }, []);
@@ -257,10 +282,21 @@ function App() {
     }
   };
 
-  const stopListening = () => {
-    if (recognition.current) {
-      setIsListening(false);
-      recognition.current.stop();
+const stopListening = () => {
+    if (recognition.current && isListening) {
+      recognition.current.stop(); // Stop the speech recognition
+      setIsListening(false);     // Update listening state
+      // Ensure the timeout is cleared when manually stopping or when silence triggers it
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+      // Regardless of how it stopped, if there's a value, send the message
+      if (value) {
+        setIsDefaultPage(false); // Consider if this should always be false here
+        getMessages();
+      }
+    } else if (value) { // This handles cases where recognition might not be active but text exists
       setIsDefaultPage(false);
       getMessages();
     }
@@ -371,21 +407,18 @@ function App() {
             {currentChat.map((chatMessage, index) => (
               <li key={index}>
                 <div className="message-container">
-                  {chatMessage && ( // Add null check for chatMessage
+                  {chatMessage && (
                     <div className="role-container">
                       <p className="role">{chatMessage.role}</p>
                       {chatMessage.role === "assistant" &&
-                        chatMessage.content && (
+                        chatMessage.content && ( // Check for chatMessage.content directly
                           <button
                             className="speak-button"
                             onClick={() => {
                               if (chatMessage.isSpeaking) {
                                 stopSpeaking();
                               } else {
-                                const content =
-                                  chatMessage.role === "user"
-                                    ? chatMessage.content.content
-                                    : chatMessage.content.content;
+                                const content = chatMessage.content; // <--- Changed this line
                                 speak(content);
                               }
                             }}
@@ -399,7 +432,7 @@ function App() {
                         )}
                     </div>
                   )}
-                  {chatMessage && chatMessage.image ? ( // Add null check for chatMessage
+                  {chatMessage && chatMessage.image ? (
                     <img
                       className="generated-image"
                       src={chatMessage.image}
@@ -407,12 +440,10 @@ function App() {
                     />
                   ) : (
                     chatMessage &&
-                    chatMessage.content && ( // Add null check for chatMessage and content
+                    chatMessage.content && ( // Check for chatMessage.content directly
                       <pre>
                         <span>
-                          {chatMessage.role === "user"
-                            ? chatMessage.content
-                            : chatMessage.content.content}
+                          {chatMessage.content} {/* <--- Changed this line */}
                         </span>
                       </pre>
                     )
@@ -461,7 +492,7 @@ function App() {
             </div>
           </div>
 
-          <p className={"info"}>Made by Rahmath, Hussain, Owais</p>
+          <p className={"info"}>Made by Jawaad, Maaz, Mateen</p>
         </div>
       </section>
 
